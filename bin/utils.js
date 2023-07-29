@@ -4,7 +4,6 @@ const awarenessProtocol = require('y-protocols/dist/awareness.cjs')
 
 const encoding = require('lib0/dist/encoding.cjs')
 const decoding = require('lib0/dist/decoding.cjs')
-const mutex = require('lib0/dist/mutex.cjs')
 const map = require('lib0/dist/map.cjs')
 
 const debounce = require('lodash.debounce')
@@ -92,7 +91,6 @@ class WSSharedDoc extends Y.Doc {
   constructor (name) {
     super({ gc: gcEnabled })
     this.name = name
-    this.mux = mutex.createMutex()
     /**
      * Maps from conn to set of controlled user ids. Delete all user ids from awareness when this conn is closed
      * @type {Map<Object, Set<number>>}
@@ -162,21 +160,30 @@ exports.getYDoc = getYDoc
  * @param {Uint8Array} message
  */
 const messageListener = (conn, doc, message) => {
-  const encoder = encoding.createEncoder()
-  const decoder = decoding.createDecoder(message)
-  const messageType = decoding.readVarUint(decoder)
-  switch (messageType) {
-    case messageSync:
-      encoding.writeVarUint(encoder, messageSync)
-      syncProtocol.readSyncMessage(decoder, encoder, doc, null)
-      if (encoding.length(encoder) > 1) {
-        send(doc, conn, encoding.toUint8Array(encoder))
+  try {
+    const encoder = encoding.createEncoder()
+    const decoder = decoding.createDecoder(message)
+    const messageType = decoding.readVarUint(decoder)
+    switch (messageType) {
+      case messageSync:
+        encoding.writeVarUint(encoder, messageSync)
+        syncProtocol.readSyncMessage(decoder, encoder, doc, conn)
+
+        // If the `encoder` only contains the type of reply message and no
+        // message, there is no need to send the message. When `encoder` only
+        // contains the type of reply, its length is 1.
+        if (encoding.length(encoder) > 1) {
+          send(doc, conn, encoding.toUint8Array(encoder))
+        }
+        break
+      case messageAwareness: {
+        awarenessProtocol.applyAwarenessUpdate(doc.awareness, decoding.readVarUint8Array(decoder), conn)
+        break
       }
-      break
-    case messageAwareness: {
-      awarenessProtocol.applyAwarenessUpdate(doc.awareness, decoding.readVarUint8Array(decoder), conn)
-      break
     }
+  } catch (err) {
+    console.error(err)
+    doc.emit('error', [err])
   }
 }
 
